@@ -101,7 +101,7 @@ def evaluator(model, testloader, device, args, tokenizer, image_processor):
     chunk_idx = rank
     # Data
     try:
-        base_path = 'xxxxx'
+        base_path = '/home/bingxing2/home/scx9kvs/lyc/QSVD/myllava'
         question_file = f'{base_path}/playground/data/eval/vizwiz/llava_test.jsonl'
         if not os.path.exists(question_file):
             raise FileNotFoundError(f"Question file not found: {question_file}")

@@ -259,6 +259,71 @@ def calib_grad_info(model, dataloader, tokenizer, image_processor, args, use_cac
                     loss = outputs[0]
                     loss = loss / accumulation_steps  # Normalize loss
                     loss.backward()
+
+            elif 'Qwen' in str(tokenizer):
+                # For Qwen-VL models, we use the specific data preparation function.
+                # NOTE: We assume `image_processor` here is the unified Qwen-VL processor
+                # which contains both the tokenizer and the image processor.
+                inputs, _, output_ids = gptq_utils.message_to_prompt_train_qwen(batch, image_processor, model, tokenizer, label_mode=args.label_mode)
+
+                # Define recursive function to move nested tensor structures to specified device
+                def move_to_device(obj, target_device):
+                    if isinstance(obj, torch.Tensor):
+                        return obj.to(target_device)
+                    elif isinstance(obj, (list, tuple)):
+                        return type(obj)(move_to_device(item, target_device) for item in obj)
+                    elif isinstance(obj, dict):
+                        return {k: move_to_device(v, target_device) for k, v in obj.items()}
+                    else:
+                        return obj
+
+                # Move all generated data to the target device
+                inputs = move_to_device(inputs, device)
+                output_ids = move_to_device(output_ids, device)
+
+                input_ids = inputs.get('input_ids')
+
+                # Ensure input and label lengths match, padding if necessary.
+                # This is a safeguard, although message_to_prompt_train_qwen should already align them.
+                if input_ids.size(1) != output_ids.size(1):
+                    max_len = max(input_ids.size(1), output_ids.size(1))
+                    # Pad input_ids with pad_token_id (or 0 if not available)
+                    pad_token_id = image_processor.tokenizer.pad_token_id if image_processor.tokenizer.pad_token_id is not None else 0
+                    if input_ids.size(1) < max_len:
+                        padding = torch.full((input_ids.size(0), max_len - input_ids.size(1)),
+                                            fill_value=pad_token_id, dtype=input_ids.dtype, device=input_ids.device)
+                        input_ids = torch.cat([input_ids, padding], dim=1)
+                    else:
+                        input_ids = input_ids[:, :max_len]
+
+                    # Pad output_ids with IGNORE_INDEX (-100)
+                    if output_ids.size(1) < max_len:
+                        padding = torch.full((output_ids.size(0), max_len - output_ids.size(1)),
+                                            fill_value=-100, dtype=output_ids.dtype, device=output_ids.device)
+                        output_ids = torch.cat([output_ids, padding], dim=1)
+                    else:
+                        output_ids = output_ids[:, :max_len]
+                    
+                    input_ids = input_ids.to(device)
+                    output_ids = output_ids.to(device)
+
+                # Update the inputs dictionary with the potentially padded/truncated input_ids
+                # and a corresponding attention_mask.
+                inputs['input_ids'] = input_ids
+                inputs['attention_mask'] = inputs.get('attention_mask', input_ids.ne(0)).to(device)
+                # Also adjust attention_mask length if it was pre-computed
+                if inputs['attention_mask'].size(1) != input_ids.size(1):
+                     inputs['attention_mask'] = inputs['attention_mask'][:, :input_ids.size(1)]
+
+
+                # Calculate loss for the current batch and perform gradient accumulation.
+                # The `inputs` dict contains input_ids, attention_mask, and pixel_values.
+                with torch.enable_grad():
+                    outputs = model(**inputs, labels=output_ids)
+                    loss = outputs[0]
+                    loss = loss / accumulation_steps  # Normalize loss
+                    loss.backward()
+                
             elif 'hf_v16' in str(tokenizer): # handle 'hf_v16_trainfix'
                 # print('now using trainfix')
                 inputs, _, _ = gptq_utils.message_to_prompt_train(batch, image_processor, model, tokenizer, label_mode=args.label_mode)
@@ -464,7 +529,6 @@ def prepare_qkv_svd(model, args):
         v_linear = layer.self_attn.v_proj
         
         try:
-            # Move weights to CUDA device
             w = torch.cat([
                 q_linear.weight.data.float(), 
                 k_linear.weight.data.float(), 
@@ -597,6 +661,7 @@ def svd_qkv_with_grad_info(layers, args, use_cache=True, cache_file=None):
         torch.save(grad_scores_dict, cache_file)
         logging.info("Gradient importance score cache saved successfully!")
     
+    # print(f"grad_scores_dict: {grad_scores_dict}")
     # Get indices and scores of top k important singular values
     num_layers = len(layers)
     hidden_size = layers[0].self_attn.q_proj.in_features # Assuming in_features is the full rank for MHA models
@@ -646,7 +711,6 @@ def get_top_k_scores(grad_scores_dict, k):
         if layer_idx not in layer_indices_dict:
             layer_indices_dict[layer_idx] = []
         layer_indices_dict[layer_idx].append(singular_idx)
-    
     return top_indices, top_scores, layer_indices_dict
 
 def visualize_score_distribution(grad_scores_dict, save_path=None, plot_type='boxplot'):

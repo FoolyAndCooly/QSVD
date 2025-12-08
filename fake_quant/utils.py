@@ -25,6 +25,7 @@ supported_models = [
             'llava-hf/llava-v1.6-vicuna-7b-hf',
             'llava-hf/llava-v1.6-vicuna-13b-hf',
             "HuggingFaceTB/SmolVLM-Instruct",
+            '/home/bingxing2/home/scx9kvs/zsh/Qwen2.5-VL-7B-Instruct'
             ]
 supported_datasets = ['wikitext2', 'ptb', 'c4','ScienceQA_Train','ScienceQA_TEST', 'VizWiz', 'SEEDBench', 'SEEDBench_IMG']
 

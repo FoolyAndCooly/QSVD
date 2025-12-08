@@ -114,56 +114,68 @@ def calib_input_distribution(model, dataloader, tokenizer, image_processor, args
 
     total_seq_length = 0
     
-    for batch in dataloader:
-            try:
-                # Ensure model and input are on the same device
-                device = utils.get_dev()  # Get the device where the model is currently located
+    for batch in tqdm(dataloader, desc="Calibrating Model"):
+        try:
+            # Ensure model and input are on the same device
+            device = utils.get_dev()  # Get the device where the model is currently located
+            
+            ## TODO:add model type as criteria
+            # Use model to generate output
+            if tokenizer is None or 'hf_v16' in str(tokenizer): # SmolVLM/llava 1.6
+                # Use message_to_prompt to process batch data
+                inputs, _ = gptq_utils.message_to_prompt(batch, image_processor, model, tokenizer)
+                inputs = inputs.to(device)
                 
-                ## TODO:add model type as criteria
-                # Use model to generate output
-                if tokenizer is None or 'hf_v16' in str(tokenizer): # SmolVLM/llava 1.6
-                    # Use message_to_prompt to process batch data
-                    inputs, _ = gptq_utils.message_to_prompt(batch, image_processor, model, tokenizer)
-                    inputs = inputs.to(device)
-                    
-                    # Assume each batch contains only one sample, directly take its sequence length
-                    seq_length = inputs['input_ids'].shape[1]
-                    total_seq_length += seq_length
-                    
-                    model.generate(**inputs,
-                                    max_new_tokens=1,
-                                    use_cache=True,)
-                else: # LLaVA
-                    # Use message_to_prompt to process batch data
-                    input_ids, images = gptq_utils.message_to_prompt(batch, image_processor, model, tokenizer)
-                    
-                    # Ensure input_ids and images are on the correct device
-                    input_ids = input_ids.to(device)
-                    image_sizes = None
-                    if images is not None:
-                        images, image_sizes = images
-                        images = images.to(device)
-                        
-                    # Assume each batch contains only one sample, directly take its sequence length
-                    seq_length = input_ids.shape[1]
-                    total_seq_length += seq_length
-        
-                    from llava.constants import IMAGE_TOKEN_INDEX
-                    # num_images = (input_ids == IMAGE_TOKEN_INDEX).sum()
-                    # print(num_images)
-                    #breakpoint()
+                # Assume each batch contains only one sample, directly take its sequence length
+                seq_length = inputs['input_ids'].shape[1]
+                total_seq_length += seq_length
                 
-                    model.generate(input_ids, images=images,
-                                   image_sizes = image_sizes,
-                                    do_sample=False,
-                                    max_new_tokens=1,
-                                    use_cache=True,)
-            except ValueError:
-                # print(f"Error during calibration: {e}")
-                # print("finish prefill exit")
-                # return
-                pass
-                # break
+                model.generate(**inputs,
+                                max_new_tokens=1,
+                                use_cache=True,)
+            elif 'Qwen' in str(tokenizer):
+
+                inputs, _ = gptq_utils.message_to_prompt_qwen(batch, image_processor, model, tokenizer)
+                inputs = inputs.to(device)
+                
+                # Assume each batch contains only one sample, directly take its sequence length
+                seq_length = inputs['input_ids'].shape[1]
+                total_seq_length += seq_length
+                
+                model.generate(**inputs,
+                                max_new_tokens=1,
+                                use_cache=True,)
+            else: # LLaVA
+                # Use message_to_prompt to process batch data
+                input_ids, images = gptq_utils.message_to_prompt(batch, image_processor, model, tokenizer)
+                
+                # Ensure input_ids and images are on the correct device
+                input_ids = input_ids.to(device)
+                image_sizes = None
+                if images is not None:
+                    images, image_sizes = images
+                    images = images.to(device)
+                    
+                # Assume each batch contains only one sample, directly take its sequence length
+                seq_length = input_ids.shape[1]
+                total_seq_length += seq_length
+
+                from llava.constants import IMAGE_TOKEN_INDEX
+                # num_images = (input_ids == IMAGE_TOKEN_INDEX).sum()
+                # print(num_images)
+                #breakpoint()
+            
+                model.generate(input_ids, images=images,
+                                image_sizes = image_sizes,
+                                do_sample=False,
+                                max_new_tokens=1,
+                                use_cache=True,)
+        except ValueError:
+            # print(f"Error during calibration: {e}")
+            # print("finish prefill exit")
+            # return
+            pass
+            # break
     # for batch in tqdm(calib_loader):
     #     # print(batch)
     #     batch = {k: v.to(model.device) for k, v in batch.items()}

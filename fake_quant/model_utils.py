@@ -11,6 +11,7 @@ OPT_MODEL = transformers.models.opt.modeling_opt.OPTForCausalLM
 OPT_LAYER = transformers.models.opt.modeling_opt.OPTDecoderLayer
 LLAMA_MODEL = transformers.models.llama.modeling_llama.LlamaForCausalLM
 LLAMA_LAYER = transformers.models.llama.modeling_llama.LlamaDecoderLayer
+QWEN_MODEL = transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration
 # LLAVA_MODEL = llava.model.language_model.llava_llama.LlavaLlamaForCausalLM
 LLAVA_MODEL = llava.model.LlavaLlamaForCausalLM
 LLAVA_NEXT_HF = transformers.models.llava_next.modeling_llava_next.LlavaNextForConditionalGeneration
@@ -50,16 +51,19 @@ def get_rope_function_name(model):
 
 
 def get_layers(model):
+    # print(f"model type: {type(model)}")
     if type(model) == OPT_MODEL:
         return model.model.decoder.layers
     if type(model) == LLAMA_MODEL:
         return model.model.layers
     if type(model) == LLAVA_MODEL:
         return model.model.layers
-    if type(model) ==LLAVA_NEXT_HF:
+    if type(model) == LLAVA_NEXT_HF:
         return model.language_model.layers
     if type(model) == SMOVLM_MODEL:
         return model.model.text_model.layers
+    if type(model) == QWEN_MODEL:
+        return model.model.language_model.layers
     raise NotImplementedError
 
 def get_llava(model_name, hf_token=None):
@@ -101,6 +105,37 @@ def get_llava(model_name, hf_token=None):
     return model, tokenizer, image_processor
     
 
+def get_qwen(model_name, hf_token=None):
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    import transformers
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoProcessor,
+        Qwen2_5_VLForConditionalGeneration,
+    )
+    processor = AutoProcessor.from_pretrained(
+        model_name, 
+        trust_remote_code=True,
+        use_auth_token=hf_token  # 如果需要认证
+    )
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,  # 推荐使用 bfloat16 以获得更好的性能和精度平衡
+        low_cpu_mem_usage=True,      # 优化CPU内存使用
+        device_map="auto",           # 自动将模型分片到可用设备上
+        trust_remote_code=True,
+        use_auth_token=hf_token
+    )
+    
+    tokenizer = processor.tokenizer
+    image_processor = processor
+
+    model.seqlen = 2048 
+
+    return model, tokenizer, image_processor
 
 def get_llama(model_name, hf_token):
     torch.nn.init.kaiming_uniform_ = skip
@@ -139,6 +174,8 @@ def get_model(
         return get_llamav(model_name, hf_token)
     elif 'SmolVLM' in model_name:
         return get_smovlm(model_name, hf_token)
+    elif 'Qwen' in model_name:
+        return get_qwen(model_name, hf_token)
     else:
         raise ValueError(f'Unknown model {model_name}')
 
@@ -189,6 +226,8 @@ def get_model_type(model):
         model_type = LLAVA_NEXT_HF
     elif isinstance(model, LLAMAV_MODLE):
         model_type = LLAMAV_MODLE
+    elif isinstance(model, QWEN_MODEL):
+        model_type = QWEN_MODEL
     elif isinstance(model, SMOVLM_MODEL):
         return SMOVLM_MODEL
     else:
@@ -247,6 +286,8 @@ def get_transformer_layers(model, model_type):
         return [layer for layer in model.model.text_model.layers]
     elif model_type == LLAVA_NEXT_HF:
         return [layer for layer in model.language_model.layers]
+    elif model_type == QWEN_MODEL:
+        return [layer for layer in model.model.language_model.layers]
     else:
         raise ValueError(f'Unknown model type {model_type}')
 

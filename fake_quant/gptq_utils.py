@@ -930,6 +930,204 @@ def message_to_prompt(message, image_processor, model, tokenizer):
     input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(utils.get_dev())
     return input_ids, (image_tensor, image_sizes)
 
+def message_to_prompt(message, image_processor, model, tokenizer):
+    from llava.mm_utils import (
+        process_images,
+        tokenizer_image_token,
+        KeywordsStoppingCriteria,
+    )
+    from llava.constants import IMAGE_TOKEN_INDEX
+    from PIL import Image
+    if tokenizer is None:
+        from transformers.image_utils import load_image
+        from PIL import Image
+        replace_mapping = {
+            "\nOptions:": "\nChoices:",
+            "Please select the correct answer from the options above.": "Answer with the letter.",
+        }
+        prompt, images = "<|im_start|>User:", []
+        for msg in message:
+            if msg["type"] == "image":
+                img = load_image(msg["value"])
+                images.append(img)
+                prompt += "<image>"
+            elif msg["type"] == "text":
+                instruction = msg["value"].strip()
+                for k, v in replace_mapping.items():
+                    instruction = instruction.replace(k, v)
+                prompt += instruction
+        prompt += "<end_of_utterance>\nAssistant: Answer:"
+        images = (
+            [images]
+            if isinstance(images, Image.Image)
+            else images
+        )
+        inputs = image_processor(
+            text=prompt, images=images, return_tensors="pt"
+        ).to("cuda")
+        return inputs, None
+    elif 'hf_v16' in str(tokenizer):
+        content, images = [], []
+        for msg in message:
+            if msg["type"] == "text":
+                content.append({"type": msg["type"], "text": msg["value"]})
+            elif msg["type"] == "image":
+                content.append({"type": "image"})
+                images.append(Image.open(msg["value"]).convert("RGB"))
+        conversation = [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ]
+        prompt = image_processor.apply_chat_template(
+        conversation, add_generation_prompt=True
+        )
+        inputs = image_processor(prompt, images, return_tensors="pt").to(
+                    "cuda", torch.float16)
+        return inputs, None
+    system_prompt = (
+            "A chat between a curious human and an artificial intelligence assistant. "
+            "The assistant gives helpful, detailed, and polite answers to the human's questions. "
+        )
+    def concat_tilist(message):
+        text, images = "", []
+        for item in message:
+            if item["type"] == "text":
+                text += item["value"]
+            elif item["type"] == "image":
+                text += " <image> "
+                images.append(item["value"])
+        return text, images
+    
+    content, images = concat_tilist(message)
+    images = [Image.open(s).convert("RGB") for s in images]
+    if images:
+        image_tensor = process_images(images, image_processor, model.config).to(
+            utils.get_dev(), dtype=torch.float16
+        )
+        image_sizes = [img.size for img in images] # for llava 1.6// one vision
+    else:
+        image_tensor = None
+        image_sizes = None
+    prompt = system_prompt + "USER: " + content + " ASSISTANT: "
+    input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(utils.get_dev())
+    return input_ids, (image_tensor, image_sizes)
+
+
+def message_to_prompt_qwen(message, processor, model, tokenizer=None):
+    from PIL import Image
+    content_list, images = [], []
+    for item in message:
+        if item["type"] == "text":
+            # Note the key change from "value" to "text"
+            content_list.append({"type": "text", "text": item["value"]})
+        elif item["type"] == "image":
+            # Note the key change from "value" to "image"
+            content_list.append({"type": "image", "image": item["value"]})
+            images.append(item["value"])
+
+    images = [Image.open(s).convert("RGB") for s in images]
+    # Wrap the content in the user role structure
+    messages_in_qwen_format = [
+        {
+            "role": "user",
+            "content": content_list,
+        }
+    ]
+
+    text = processor.apply_chat_template(
+        messages_in_qwen_format, tokenize=False, add_generation_prompt=True
+    )
+
+    images = (
+        [images]
+        if isinstance(images, Image.Image)
+        else images
+    )
+
+    inputs = processor(
+        text=[text],
+        images=images,
+        padding=True,
+        return_tensors="pt",
+    )
+
+    inputs = inputs.to(model.device)
+
+    return inputs, None
+
+# 位于 gptq_utils.py
+def message_to_prompt_train_qwen(message, processor, model, tokenizer, label_mode="qa-qa"):
+    from PIL import Image
+    IGNORE_INDEX = -100
+
+    # 1. 解析原始消息（这部分保持不变）
+    content_list, images, answer_list = [], [], []
+    for item in message:
+        if item["type"] == "text":
+            clean_text = item["value"].replace("\nAnswer with the option's letter from the given choices directly.", "").strip()
+            content_list.append({"type": "text", "text": clean_text})
+        elif item["type"] == "image":
+            content_list.append({"type": "image", "image": item["value"]})
+            images.append(Image.open(item["value"]).convert("RGB"))
+        elif item["type"] == "textanw":
+            answer_list.append({"type": "text", "text": item["value"]})
+
+    # 2 & 3. 构建对话（这部分保持不变）
+    conversation_full = [{"role": "user", "content": content_list}, {"role": "assistant", "content": answer_list}]
+    conversation_prompt_only = [{"role": "user", "content": content_list}, {"role": "assistant", "content": []}]
+
+    # 4. 使用 processor 处理，生成 CPU 张量
+    text_full = processor.apply_chat_template(conversation_full, tokenize=False, add_generation_prompt=False)
+    inputs = processor(text=[text_full], images=images, padding='longest', return_tensors="pt")
+    
+    text_prompt_only = processor.apply_chat_template(conversation_prompt_only, tokenize=False, add_generation_prompt=False)
+    prompt_only_inputs = processor(text=[text_prompt_only], images=images, return_tensors="pt")
+    prompt_len = prompt_only_inputs['input_ids'].shape[1]
+    # print(f"input_ids: {inputs['input_ids']}, input_ids shape: {inputs['input_ids'].shape}, att_mask: {inputs['attention_mask']}, att_mask shape: {inputs['attention_mask'].shape}")
+    # 5. 创建和位移 labels（这部分保持不变）
+    labels = inputs['input_ids'].clone()
+    labels[:, :prompt_len] = IGNORE_INDEX
+    pad_token_id = processor.tokenizer.pad_token_id
+    if pad_token_id is not None:
+        labels[labels == pad_token_id] = IGNORE_INDEX
+    
+    final_input_ids = inputs['input_ids'][:, :-1]
+    final_attention_mask = inputs.get('attention_mask')[:, :-1] if inputs.get('attention_mask') is not None else None
+    final_labels = labels[:, 1:]
+
+        # 准备最终要传递给模型的字典
+    if images:
+        final_inputs = {
+            'input_ids': final_input_ids,
+            'attention_mask': final_attention_mask,
+            'pixel_values': inputs['pixel_values'],
+            'image_grid_thw': inputs['image_grid_thw'], # 添加新参数
+        }
+    else:
+        final_inputs = {
+            'input_ids': final_input_ids,
+            'attention_mask': final_attention_mask,
+        }
+
+    # 移除值为 None 的键，避免向模型传递不必要的 None 参数
+    final_inputs = {k: v for k, v in final_inputs.items() if v is not None}
+
+    # 7. 将所有张量移动到目标设备
+    target_device = model.device
+    for key, value in final_inputs.items():
+        if isinstance(value, torch.Tensor):
+            final_inputs[key] = value.to(target_device)
+        # [FIX] 正确处理 pixel_values (它是张量列表)
+        elif isinstance(value, list) and len(value) > 0 and isinstance(value[0], torch.Tensor):
+            final_inputs[key] = [v.to(target_device) for v in value]
+        # image_grid_thw 是 int 列表，不需要移动
+    
+    final_labels = final_labels.to(target_device)
+
+    # 8. 返回
+    return final_inputs, None, final_labels
 
 def message_to_prompt_train(message, image_processor, model, tokenizer, label_mode="qa-qa"):
     from llava.mm_utils import (
