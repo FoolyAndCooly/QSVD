@@ -32,7 +32,8 @@ class SVDLinear(nn.Module):
     def __init__(self, U, S, V, bias=None, sigma_fuse="UV", had_K=None, K=-1, had_mode='hadamard') -> None:
         super().__init__()
         self.ALinear = nn.Linear(U.size(1), U.size(0), bias=bias is not None)
-
+        # print(f"out: {U.size(0)}, bias: {bias.size(0)}")
+        assert(U.size(0) == bias.size(0))
         if bias is not None:
             self.ALinear.bias.data = bias
         self.BLinear = nn.Linear(V.size(0), V.size(1), bias=False)
@@ -593,7 +594,14 @@ class SVDLinear(nn.Module):
 
     def forward(self, inp):
         # compute USV^Tx + b
-        y = self.BLinear(inp)
+        # b_bias_shape = self.BLinear.bias.shape if self.BLinear.bias is not None else "No Bias"
+        # print(f"BLinear -> Weight Shape: {self.BLinear.weight.shape}, Bias Shape: {b_bias_shape}")
+        # 经过 BLinear 后的中间张量形状
+        y = self.BLinear(inp) # 假设这是第一步
+        # print(f"Intermediate Tensor Shape (after BLinear): {y.shape}")
+        # 检查 ALinear
+        # a_bias_shape = self.ALinear.bias.shape if self.ALinear.bias is not None else "No Bias"
+        # print(f"ALinear -> Weight Shape: {self.ALinear.weight.shape}, Bias Shape: {a_bias_shape}")
         y = self.ALinear(y)
         return y
 
@@ -701,8 +709,13 @@ def from_linearqkv_with_grad(
                 V_selected = scaling_diag_matrix_inv.T @ V_selected
             
         # Split U into three parts, corresponding to q, k, v
-        U_selected = U_selected.view(3, -1, rank)
-        Us = [U_selected[0], U_selected[1], U_selected[2]]
+        d_q = linear.out_features
+        d_k = linear1.out_features
+        d_v = linear2.out_features
+        # print(f"qkv: {d_q}, {d_k}, {d_v}")
+        # U_selected = U_selected.view(3, -1, rank)
+        U_q, U_k, U_v = torch.split(U_selected, [d_q, d_k, d_v], dim=0)
+        Us = [U_q, U_k, U_v]
         Ss = [S_selected]
         Vs = [V_selected]
         
@@ -943,7 +956,6 @@ def svd_lm_setup(model, args, tokenizer, image_processor):
     model_type = model_utils.get_model_type(model)
     utils.cleanup_memory()
     layers = model_utils.get_transformer_layers(model, model_type=model_type)
-    
     if args.grad_info:
         rank, world_size = get_rank_and_world_size()
         top_indices, top_scores, layer_indices_dict = grad_info_utils.svd_qkv_with_grad_info(layers, args, use_cache=args.use_cache, cache_file=args.cache_file) # top_indices: (layer_idx, singular_value_idx)
